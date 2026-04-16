@@ -105,6 +105,14 @@ static HWND g_hMemInputFrame = nullptr;
 static bool g_isPinned = false;
 
 //=============================================================================
+// 前向声明
+//=============================================================================
+
+static void LoadGroup(const std::wstring& groupName);
+static void LoadStatusGroup(const std::wstring& groupName);
+static void LoadStatusWord(const std::wstring& statusKey);
+
+//=============================================================================
 // 工具函数
 //=============================================================================
 
