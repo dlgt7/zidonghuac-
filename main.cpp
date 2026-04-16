@@ -1482,18 +1482,18 @@ static void CreateSpeedTab(HWND hParent) {
 static void ResizeTabPages() {
     if (!g_hTab) return;
     
-    RECT rc;
-    GetClientRect(g_hTab, &rc);
-    TabCtrl_AdjustRect(g_hTab, FALSE, &rc);   // 关键：减去Tab标题栏区域
+    RECT rcTab;
+    GetClientRect(g_hTab, &rcTab);
+    TabCtrl_AdjustRect(g_hTab, FALSE, &rcTab);   // 减去Tab标题栏区域
     
     for (int i = 0; i < 5; ++i) {
         if (g_hTabPages[i]) {
-            // 使用SetWindowPos而不是MoveWindow，更可靠
+            // 使用HWND_TOP + SWP_SHOWWINDOW更可靠
             SetWindowPos(g_hTabPages[i], HWND_TOP, 
-                rc.left, rc.top, 
-                rc.right - rc.left, 
-                rc.bottom - rc.top, 
-                SWP_NOZORDER | SWP_NOACTIVATE);
+                rcTab.left, rcTab.top, 
+                rcTab.right - rcTab.left, 
+                rcTab.bottom - rcTab.top, 
+                SWP_NOACTIVATE | SWP_NOZORDER);   // 先不带SHOW
         }
     }
 }
@@ -1541,10 +1541,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             
             // 创建Tab控件
             g_hTab = CreateWindowExW(0, WC_TABCONTROLW, L"", 
-                WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS, 
+                WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS | TCS_MULTILINE, 
                 5, 45, WINDOW_WIDTH - 15, WINDOW_HEIGHT - 55, 
                 hWnd, (HMENU)IDC_TAB_CONTROL, g_hInst, nullptr);
-            if (g_hTab && g_hFont) SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+            if (g_hTab && g_hFont) 
+                SendMessageW(g_hTab, WM_SETFONT, (WPARAM)g_hFont, TRUE);
             
             // 添加Tab页
             const wchar_t* tabNames[] = {
@@ -1560,14 +1561,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                 TabCtrl_InsertItem(g_hTab, i, &tci);
             }
             
-            // 创建Tab页面容器（使用WS_EX_CONTROLPARENT以支持Tab键导航）
+            // 创建Tab页面容器（重要：父窗口必须是 g_hTab！）
             for (int i = 0; i < 5; ++i) {
                 g_hTabPages[i] = CreateWindowExW(
                     WS_EX_CONTROLPARENT, 
                     L"STATIC", L"", 
-                    WS_VISIBLE | WS_CHILD | WS_CLIPSIBLINGS, 
-                    0, 0, 0, 0, 
-                    hWnd, nullptr, g_hInst, nullptr
+                    WS_CHILD | WS_CLIPSIBLINGS | WS_VISIBLE,   // 先创建为 VISIBLE
+                    0, 0, 10, 10, 
+                    g_hTab,                                    // ←←← 关键修改：父窗口改为 g_hTab
+                    nullptr, 
+                    g_hInst, 
+                    nullptr
                 );
             }
             
@@ -1578,21 +1582,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             CreateAnalogTab(g_hTabPages[3]);
             CreateSpeedTab(g_hTabPages[4]);
             
-            // 先隐藏所有Tab页面
-            for (int i = 0; i < 5; ++i) {
-                if (g_hTabPages[i]) ShowWindow(g_hTabPages[i], SW_HIDE);
+            // 隐藏所有 TabPage（只显示第一个）
+            for (int i = 1; i < 5; ++i) {
+                if (g_hTabPages[i]) 
+                    ShowWindow(g_hTabPages[i], SW_HIDE);
             }
             
-            // 强制调整一次大小（非常重要！）
+            // 强制调整大小并显示第一个页面
             ResizeTabPages();
+            if (g_hTabPages[0]) {
+                ShowWindow(g_hTabPages[0], SW_SHOW);
+                UpdateWindow(g_hTabPages[0]);
+            }
             
-            // 显示第一个Tab页面
-            ShowWindow(g_hTabPages[0], SW_SHOW);
             g_currentTab = 0;
             
-            // 再强制刷新一次（解决部分情况下控件不显示的问题）
-            UpdateWindow(g_hMainWnd);
+            // 最终强制刷新整个窗口
             InvalidateRect(g_hMainWnd, nullptr, TRUE);
+            UpdateWindow(g_hMainWnd);
             
             break;
         }
@@ -1646,6 +1653,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         
         case WM_SIZE:
             ResizeTabPages();
+            InvalidateRect(g_hTab, nullptr, TRUE);   // 新增这行
             break;
             
         case WM_SHOWWINDOW:
