@@ -1484,11 +1484,16 @@ static void ResizeTabPages() {
     
     RECT rc;
     GetClientRect(g_hTab, &rc);
-    TabCtrl_AdjustRect(g_hTab, FALSE, &rc);
+    TabCtrl_AdjustRect(g_hTab, FALSE, &rc);   // 关键：减去Tab标题栏区域
     
     for (int i = 0; i < 5; ++i) {
         if (g_hTabPages[i]) {
-            SetWindowPos(g_hTabPages[i], nullptr, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, SWP_NOZORDER);
+            // 使用SetWindowPos而不是MoveWindow，更可靠
+            SetWindowPos(g_hTabPages[i], HWND_TOP, 
+                rc.left, rc.top, 
+                rc.right - rc.left, 
+                rc.bottom - rc.top, 
+                SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 }
@@ -1573,10 +1578,21 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             CreateAnalogTab(g_hTabPages[3]);
             CreateSpeedTab(g_hTabPages[4]);
             
-            // 调整页面大小并显示第一个
+            // 先隐藏所有Tab页面
+            for (int i = 0; i < 5; ++i) {
+                if (g_hTabPages[i]) ShowWindow(g_hTabPages[i], SW_HIDE);
+            }
+            
+            // 强制调整一次大小（非常重要！）
             ResizeTabPages();
+            
+            // 显示第一个Tab页面
             ShowWindow(g_hTabPages[0], SW_SHOW);
-            for (int i = 1; i < 5; ++i) ShowWindow(g_hTabPages[i], SW_HIDE);
+            g_currentTab = 0;
+            
+            // 再强制刷新一次（解决部分情况下控件不显示的问题）
+            UpdateWindow(g_hMainWnd);
+            InvalidateRect(g_hMainWnd, nullptr, TRUE);
             
             break;
         }
@@ -1630,6 +1646,12 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
         
         case WM_SIZE:
             ResizeTabPages();
+            break;
+            
+        case WM_SHOWWINDOW:
+            if (wParam) {           // 窗口被显示时
+                ResizeTabPages();
+            }
             break;
             
         case WM_CTLCOLORSTATIC:
