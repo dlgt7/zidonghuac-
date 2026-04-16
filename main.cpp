@@ -36,6 +36,8 @@
 // 全局常量
 //=============================================================================
 
+#define WM_IMPORT_COMPLETE (WM_USER + 101)
+
 static const wchar_t* WINDOW_TITLE = L"自动化计算工具-王国强-202603";
 static const int WINDOW_WIDTH = 533;
 static const int WINDOW_HEIGHT = 630;
@@ -66,6 +68,19 @@ struct GroupData {
     std::map<int, BitInfo> first_word;
     std::map<int, BitInfo> second_word;
     std::string word_displayon = "0";
+};
+
+struct ThreadParams {
+    std::wstring filePath;
+    HWND hMainWnd;
+};
+
+struct ImportResult {
+    bool success = false;
+    bool isStatusFormat = false;
+    std::wstring decodeMethod;
+    std::wstring errorMsg;
+    size_t groupCount = 0;
 };
 
 //=============================================================================
@@ -103,6 +118,13 @@ static HWND g_hMemInputFrame = nullptr;
 
 // 置顶状态
 static bool g_isPinned = false;
+
+// 线程同步
+static CRITICAL_SECTION g_csData;
+static bool g_csInitialized = false;
+
+// 导入状态
+static bool g_isImporting = false;
 
 //=============================================================================
 // 前向声明
@@ -369,9 +391,10 @@ static HWND CreateGroupBox(HWND parent, int id, const wchar_t* text, int x, int 
     return hGroup;
 }
 
-static HWND CreateRadioButton(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, bool checked = false, bool firstInGroup = false) {
+static HWND CreateRadioButton(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, bool checked = false, bool firstInGroup = false, bool multiline = false) {
     DWORD style = WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON;
     if (firstInGroup) style |= WS_GROUP;
+    if (multiline) style |= BS_MULTILINE;
     HWND hRadio = CreateWindowExW(0, L"BUTTON", text, style, x, y, w, h, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
     if (hRadio && g_hFont) SendMessageW(hRadio, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     if (checked) SendMessageW(hRadio, BM_SETCHECK, BST_CHECKED, 0);
@@ -783,10 +806,283 @@ static void LoadStatusWord(const std::wstring& statusKey) {
 // 功能函数
 //=============================================================================
 
+static DWORD WINAPI ImportThreadProc(LPVOID lpParam) {
+    ThreadParams* params = static_cast<ThreadParams*>(lpParam);
+    std::wstring filePath = params->filePath;
+    HWND hWnd = params->hMainWnd;
+    delete params;
+    
+    ImportResult* result = new ImportResult();
+    
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        result->errorMsg = L"无法打开文件";
+        PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+        return 1;
+    }
+    
+    DWORD fileSize = GetFileSize(hFile, nullptr);
+    if (fileSize == INVALID_FILE_SIZE || fileSize > 10 * 1024 * 1024) {
+        CloseHandle(hFile);
+        result->errorMsg = L"文件大小无效或过大（最大10MB）";
+        PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+        return 1;
+    }
+    
+    std::string content(fileSize, 0);
+    DWORD bytesRead;
+    BOOL readOk = ReadFile(hFile, &content[0], fileSize, &bytesRead, nullptr);
+    CloseHandle(hFile);
+    
+    if (!readOk || bytesRead != fileSize) {
+        result->errorMsg = L"读取文件失败";
+        PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+        return 1;
+    }
+    
+    bool isUtf8Bom = false;
+    size_t startPos = 0;
+    
+    if (bytesRead >= 3 && (unsigned char)content[0] == 0xEF && 
+        (unsigned char)content[1] == 0xBB && (unsigned char)content[2] == 0xBF) {
+        isUtf8Bom = true;
+        startPos = 3;
+    }
+    
+    content.erase(std::remove(content.begin(), content.end(), '\r'), content.end());
+    while (!content.empty() && (content.back() == '\n' || content.back() == ' ' || content.back() == '\t')) {
+        content.pop_back();
+    }
+    
+    json::Value data;
+    bool isBase64 = false;
+    std::wstring decodeMethod;
+    
+    try {
+        json::Parser parser;
+        data = parser.parse(content.substr(startPos));
+        decodeMethod = isUtf8Bom ? L"UTF-8 BOM格式" : L"UTF-8格式";
+    } catch (...) {
+        try {
+            std::wstring decoded = Base64Decode(content);
+            if (decoded.empty()) {
+                try {
+                    json::Parser parser;
+                    std::wstring wcontent = GbkToWstring(content.substr(startPos));
+                    data = parser.parse(WstringToUtf8(wcontent));
+                    decodeMethod = L"GBK格式";
+                } catch (...) {
+                    result->errorMsg = L"无法解析文件内容\n支持的格式：UTF-8、UTF-8 BOM、GBK、Base64编码JSON";
+                    PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+                    return 1;
+                }
+            } else {
+                json::Parser parser;
+                data = parser.parse(WstringToUtf8(decoded));
+                isBase64 = true;
+                decodeMethod = L"Base64编码格式";
+            }
+        } catch (...) {
+            try {
+                json::Parser parser;
+                std::wstring wcontent = GbkToWstring(content.substr(startPos));
+                data = parser.parse(WstringToUtf8(wcontent));
+                decodeMethod = L"GBK格式";
+            } catch (...) {
+                result->errorMsg = L"无法解析文件内容\n支持的格式：UTF-8、UTF-8 BOM、GBK、Base64编码JSON";
+                PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+                return 1;
+            }
+        }
+    }
+    
+    if (data.has("groups")) {
+        auto& groups = data["groups"];
+        if (!groups.is_object()) {
+            result->errorMsg = L"JSON格式错误：groups字段必须是对象";
+            PostMessage(hWnd, WM_IMPORT_COMPLETE, FALSE, reinterpret_cast<LPARAM>(result));
+            return 1;
+        }
+        
+        bool isStatusFormat = false;
+        for (const auto& name : groups.keys()) {
+            auto& g = groups[name];
+            if (g.has("status_map") || g.has("status_name")) {
+                isStatusFormat = true;
+                break;
+            }
+        }
+        
+        EnterCriticalSection(&g_csData);
+        
+        if (isStatusFormat) {
+            g_statusGroups.clear();
+            
+            for (const auto& name : groups.keys()) {
+                auto& g = groups[name];
+                if (!g.is_object()) continue;
+                
+                std::wstring gname = Utf8ToWstring(name);
+                std::map<std::wstring, std::wstring> statusMap;
+                
+                if (g.has("status_map") && g["status_map"].is_object()) {
+                    auto& sm = g["status_map"];
+                    for (const auto& key : sm.keys()) {
+                        statusMap[Utf8ToWstring(key)] = SafeJsonString(sm[key]);
+                    }
+                } else if (g.has("first_word") && g["first_word"].is_object()) {
+                    auto& fw = g["first_word"];
+                    for (const auto& key : fw.keys()) {
+                        statusMap[Utf8ToWstring(key)] = SafeJsonString(fw[key]);
+                    }
+                }
+                
+                if (!statusMap.empty()) {
+                    g_statusGroups[gname] = statusMap;
+                }
+            }
+            result->groupCount = g_statusGroups.size();
+        } else {
+            g_groups.clear();
+            
+            for (const auto& name : groups.keys()) {
+                auto& g = groups[name];
+                if (!g.is_object()) continue;
+                
+                GroupData gd;
+                if (g.has("first_name")) gd.first_name = SafeJsonString(g["first_name"], L"第一个字");
+                if (g.has("second_name")) gd.second_name = SafeJsonString(g["second_name"], L"第二个字");
+                if (g.has("displayon")) gd.word_displayon = SafeJsonStringUtf8(g["displayon"], "0");
+                
+                if (g.has("first_word") && g["first_word"].is_object()) {
+                    auto& fw = g["first_word"];
+                    for (const auto& key : fw.keys()) {
+                        int bit = 0;
+                        if (!TryParseInt(Utf8ToWstring(key), bit)) continue;
+                        
+                        auto& info = fw[key];
+                        BitInfo bi;
+                        if (info.is_string()) {
+                            bi.description = SafeJsonString(info);
+                        } else if (info.is_object()) {
+                            if (info.has("description")) bi.description = SafeJsonString(info["description"]);
+                            if (info.has("display_on")) bi.display_on = SafeJsonStringUtf8(info["display_on"], "1");
+                        }
+                        gd.first_word[bit] = bi;
+                    }
+                }
+                
+                if (g.has("second_word") && g["second_word"].is_object()) {
+                    auto& sw = g["second_word"];
+                    for (const auto& key : sw.keys()) {
+                        int bit = 0;
+                        if (!TryParseInt(Utf8ToWstring(key), bit)) continue;
+                        
+                        auto& info = sw[key];
+                        BitInfo bi;
+                        if (info.is_string()) {
+                            bi.description = SafeJsonString(info);
+                        } else if (info.is_object()) {
+                            if (info.has("description")) bi.description = SafeJsonString(info["description"]);
+                            if (info.has("display_on")) bi.display_on = SafeJsonStringUtf8(info["display_on"], "1");
+                        }
+                        gd.second_word[bit] = bi;
+                    }
+                }
+                
+                g_groups[Utf8ToWstring(name)] = gd;
+            }
+            result->groupCount = g_groups.size();
+        }
+        
+        LeaveCriticalSection(&g_csData);
+        
+        result->success = true;
+        result->isStatusFormat = isStatusFormat;
+        result->decodeMethod = decodeMethod;
+    } else {
+        EnterCriticalSection(&g_csData);
+        
+        bool isStatusFormat = data.is_object();
+        for (const auto& key : data.keys()) {
+            if (!data[key].is_string()) {
+                isStatusFormat = false;
+                break;
+            }
+        }
+        
+        if (isStatusFormat && !data.has("first_word") && !data.has("second_word")) {
+            g_statusWordMap.clear();
+            for (const auto& key : data.keys()) {
+                g_statusWordMap[Utf8ToWstring(key)] = SafeJsonString(data[key]);
+            }
+            result->groupCount = g_statusWordMap.size();
+            result->isStatusFormat = true;
+        } else {
+            GroupData gd;
+            if (data.has("first_name")) gd.first_name = SafeJsonString(data["first_name"], L"第一个字");
+            if (data.has("second_name")) gd.second_name = SafeJsonString(data["second_name"], L"第二个字");
+            if (data.has("displayon")) gd.word_displayon = SafeJsonStringUtf8(data["displayon"], "0");
+            
+            if (data.has("first_word") && data["first_word"].is_object()) {
+                auto& fw = data["first_word"];
+                for (const auto& key : fw.keys()) {
+                    int bit = 0;
+                    if (!TryParseInt(Utf8ToWstring(key), bit)) continue;
+                    
+                    auto& info = fw[key];
+                    BitInfo bi;
+                    if (info.is_string()) {
+                        bi.description = SafeJsonString(info);
+                    } else if (info.is_object()) {
+                        if (info.has("description")) bi.description = SafeJsonString(info["description"]);
+                        if (info.has("display_on")) bi.display_on = SafeJsonStringUtf8(info["display_on"], "1");
+                    }
+                    gd.first_word[bit] = bi;
+                }
+            }
+            
+            if (data.has("second_word") && data["second_word"].is_object()) {
+                auto& sw = data["second_word"];
+                for (const auto& key : sw.keys()) {
+                    int bit = 0;
+                    if (!TryParseInt(Utf8ToWstring(key), bit)) continue;
+                    
+                    auto& info = sw[key];
+                    BitInfo bi;
+                    if (info.is_string()) {
+                        bi.description = SafeJsonString(info);
+                    } else if (info.is_object()) {
+                        if (info.has("description")) bi.description = SafeJsonString(info["description"]);
+                        if (info.has("display_on")) bi.display_on = SafeJsonStringUtf8(info["display_on"], "1");
+                    }
+                    gd.second_word[bit] = bi;
+                }
+            }
+            
+            g_groups[L"默认"] = gd;
+            result->groupCount = 1;
+            result->isStatusFormat = false;
+        }
+        
+        LeaveCriticalSection(&g_csData);
+        
+        result->success = true;
+        result->decodeMethod = decodeMethod;
+    }
+    
+    PostMessage(hWnd, WM_IMPORT_COMPLETE, TRUE, reinterpret_cast<LPARAM>(result));
+    return 0;
+}
+
 static void ImportJson() {
+    if (g_isImporting) {
+        ShowInfo(g_hMainWnd, L"正在导入中，请稍候...");
+        return;
+    }
+    
     wchar_t filePath[MAX_PATH] = {0};
     
-    // 获取exe所在目录作为初始目录
     wchar_t exePath[MAX_PATH] = {0};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring exeDir = exePath;
@@ -805,7 +1101,41 @@ static void ImportJson() {
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
     
     if (GetOpenFileNameW(&ofn)) {
-        LoadJsonData(filePath);
+        g_isImporting = true;
+        
+        HWND hBtn = GetDlgItem(g_hMainWnd, IDC_BTN_IMPORT);
+        if (hBtn) {
+            EnableWindow(hBtn, FALSE);
+            SetWindowTextW(hBtn, L"  导入中...  ");
+        }
+        
+        HWND hResult = GetDlgItem(g_hTabPages[0], IDC_RESULT_TEXT);
+        if (hResult) {
+            ClearText(hResult);
+            AppendText(hResult, L"正在解析文件，请稍候...\r\n");
+            AppendText(hResult, L"════════════════════════\r\n");
+            AppendText(hResult, L"提示：程序正在后台处理，界面保持响应。\r\n");
+        }
+        
+        HWND hStatusResult = GetDlgItem(g_hTabPages[1], IDC_STATUS_RESULT);
+        if (hStatusResult) {
+            ClearText(hStatusResult);
+            AppendText(hStatusResult, L"正在解析文件，请稍候...\r\n");
+        }
+        
+        ThreadParams* params = new ThreadParams{filePath, g_hMainWnd};
+        HANDLE hThread = CreateThread(nullptr, 0, ImportThreadProc, params, 0, nullptr);
+        if (hThread) {
+            CloseHandle(hThread);
+        } else {
+            delete params;
+            g_isImporting = false;
+            if (hBtn) {
+                EnableWindow(hBtn, TRUE);
+                SetWindowTextW(hBtn, L"  导入  ");
+            }
+            ShowError(g_hMainWnd, L"无法创建后台线程");
+        }
     }
 }
 
@@ -880,8 +1210,31 @@ static void ShowPopupMenu(const std::vector<std::wstring>& items, bool isStatus)
     GetWindowRect(hBtn, &rc);
     
     HMENU hMenu = CreatePopupMenu();
-    for (size_t i = 0; i < items.size() && i < 100; ++i) {
-        AppendMenuW(hMenu, MF_STRING, IDM_POPUP_BASE + (int)i, items[i].c_str());
+    
+    const int itemsPerColumn = 10;
+    size_t totalItems = std::min(items.size(), (size_t)100);
+    int numColumns = (int)((totalItems + itemsPerColumn - 1) / itemsPerColumn);
+    
+    if (numColumns <= 1) {
+        for (size_t i = 0; i < totalItems; ++i) {
+            AppendMenuW(hMenu, MF_STRING, IDM_POPUP_BASE + (int)i, items[i].c_str());
+        }
+    } else {
+        std::vector<HMENU> columnMenus;
+        for (int col = 0; col < numColumns; ++col) {
+            HMENU hColMenu = CreatePopupMenu();
+            columnMenus.push_back(hColMenu);
+            
+            int startIdx = col * itemsPerColumn;
+            int endIdx = std::min(startIdx + itemsPerColumn, (int)totalItems);
+            
+            for (int i = startIdx; i < endIdx; ++i) {
+                AppendMenuW(hColMenu, MF_STRING, IDM_POPUP_BASE + i, items[i].c_str());
+            }
+            
+            std::wstring colTitle = L"第" + IntToWstr(col + 1) + L"列";
+            AppendMenuW(hMenu, MF_STRING | MF_POPUP, (UINT_PTR)hColMenu, colTitle.c_str());
+        }
     }
     
     int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_LEFTALIGN, rc.left, rc.bottom, 0, g_hMainWnd, nullptr);
@@ -1378,23 +1731,17 @@ static void CreateStatusTab(HWND hParent) {
 static void CreateMemoryTab(HWND hParent) {
     HWND hTypeGroup = CreateGroupBox(hParent, 0, L"计算类型", 10, 10, 150, 200);
     
-    int y = 30;
+    int y = 25;
     const wchar_t* types[] = {
-        L"模拟量计算",
-        L"  16进制地址",
-        L"模拟量计算",
-        L"  R地址",
-        L"数字量计算",
-        L"  16进制地址和位数",
-        L"数字量计算",
-        L"  M地址"
+        L"模拟量计算\r\n16进制地址",
+        L"模拟量计算\r\nR地址",
+        L"数字量计算\r\n16进制地址和位数",
+        L"数字量计算\r\nM地址"
     };
     
     for (int i = 0; i < 4; ++i) {
-        HWND hRadio = CreateRadioButton(hTypeGroup, IDC_MEM_CALC_TYPE + i, types[i*2], 10, y, 130, 18, i == 0, i == 0);
-        y += 20;
-        CreateStatic(hTypeGroup, types[i*2+1], 10, y, 130, 18);
-        y += 30;
+        HWND hRadio = CreateRadioButton(hTypeGroup, IDC_MEM_CALC_TYPE + i, types[i], 10, y, 130, 40, i == 0, i == 0, true);
+        y += 45;
     }
     
     g_hMemInputFrame = CreateGroupBox(hParent, IDC_MEM_INPUT_FRAME, L"输入参数", 170, 10, 330, 160);
@@ -1514,6 +1861,12 @@ static void SwitchTabPage(int newIndex) {
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE: {
+            // 初始化临界区
+            if (!g_csInitialized) {
+                InitializeCriticalSection(&g_csData);
+                g_csInitialized = true;
+            }
+            
             // 初始化通用控件
             INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
             InitCommonControlsEx(&icc);
@@ -1647,6 +2000,48 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
                         CreateMemoryInputFields();
                     }
                     break;
+            }
+            break;
+        }
+        
+        case WM_IMPORT_COMPLETE: {
+            ImportResult* result = reinterpret_cast<ImportResult*>(lParam);
+            
+            g_isImporting = false;
+            
+            HWND hBtn = GetDlgItem(g_hMainWnd, IDC_BTN_IMPORT);
+            if (hBtn) {
+                EnableWindow(hBtn, TRUE);
+                SetWindowTextW(hBtn, L"  导入  ");
+            }
+            
+            if (result) {
+                if (result->success) {
+                    if (result->isStatusFormat) {
+                        if (!g_statusGroups.empty()) {
+                            LoadStatusGroup(g_statusGroups.begin()->first);
+                        }
+                        std::wstring msg = L"成功导入 " + IntToWstr(result->groupCount) + L" 个状态字分组！(" + result->decodeMethod + L")";
+                        ShowInfo(g_hMainWnd, msg.c_str());
+                    } else {
+                        if (!g_groups.empty()) {
+                            LoadGroup(g_groups.begin()->first);
+                        } else if (g_statusWordMap.empty()) {
+                            std::wstring msg = L"成功导入数据！(" + result->decodeMethod + L")";
+                            ShowInfo(g_hMainWnd, msg.c_str());
+                        }
+                        if (!g_groups.empty()) {
+                            std::wstring msg = L"成功导入 " + IntToWstr(result->groupCount) + L" 个分组！(" + result->decodeMethod + L")";
+                            ShowInfo(g_hMainWnd, msg.c_str());
+                        } else {
+                            std::wstring msg = L"打包数据对应表导入完成！(" + result->decodeMethod + L")";
+                            ShowInfo(g_hMainWnd, msg.c_str());
+                        }
+                    }
+                } else {
+                    ShowError(g_hMainWnd, result->errorMsg.c_str());
+                }
+                delete result;
             }
             break;
         }
