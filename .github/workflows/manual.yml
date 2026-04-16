@@ -1,13 +1,6 @@
 name: Build Windows Executable
 
 on:
-  push:
-    branches: [ main, master ]
-    paths:
-      - 'cpp_version/**'
-      - '.github/workflows/build.yml'
-  pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 jobs:
@@ -28,13 +21,11 @@ jobs:
     - name: Build (Release)
       if: matrix.build_type == 'Release'
       run: |
-        cd cpp_version
         cl /nologo /W3 /O2 /EHsc /DNDEBUG /D "UNICODE" /D "_UNICODE" /D "WIN32" /D "_WINDOWS" main.cpp /Fe:自动化计算工具.exe /link user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib /SUBSYSTEM:WINDOWS
 
     - name: Build (MinSizeRel - 最小体积)
       if: matrix.build_type == 'MinSizeRel'
       run: |
-        cd cpp_version
         cl /nologo /W0 /O1 /Os /Oy /GF /GL /Gy /EHsc /DNDEBUG /D "UNICODE" /D "_UNICODE" /D "WIN32" /D "_WINDOWS" main.cpp /Fe:自动化计算工具_mini.exe /link user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /MERGE:.rdata=.text /MERGE:.pdata=.rdata
 
     - name: Upload artifact (Release)
@@ -42,14 +33,14 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: 自动化计算工具-Release
-        path: cpp_version/自动化计算工具.exe
+        path: 自动化计算工具.exe
 
     - name: Upload artifact (MinSizeRel)
       if: matrix.build_type == 'MinSizeRel'
       uses: actions/upload-artifact@v4
       with:
         name: 自动化计算工具-MinSizeRel
-        path: cpp_version/自动化计算工具_mini.exe
+        path: 自动化计算工具_mini.exe
 
   release:
     needs: build
