@@ -1,0 +1,107 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'cpp_version/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    strategy:
+      matrix:
+        build_type: [Release, MinSizeRel]
+        
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup MSVC
+      uses: ilammy/msvc-dev-cmd@v1
+
+    - name: Build (Release)
+      if: matrix.build_type == 'Release'
+      run: |
+        cd cpp_version
+        cl /nologo /W3 /O2 /EHsc /DNDEBUG /D "UNICODE" /D "_UNICODE" /D "WIN32" /D "_WINDOWS" main.cpp /Fe:自动化计算工具.exe /link user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib /SUBSYSTEM:WINDOWS
+
+    - name: Build (MinSizeRel - 最小体积)
+      if: matrix.build_type == 'MinSizeRel'
+      run: |
+        cd cpp_version
+        cl /nologo /W0 /O1 /Os /Oy /GF /GL /Gy /EHsc /DNDEBUG /D "UNICODE" /D "_UNICODE" /D "WIN32" /D "_WINDOWS" main.cpp /Fe:自动化计算工具_mini.exe /link user32.lib gdi32.lib comctl32.lib comdlg32.lib shell32.lib ole32.lib /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF /MERGE:.rdata=.text /MERGE:.pdata=.rdata
+
+    - name: Upload artifact (Release)
+      if: matrix.build_type == 'Release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: 自动化计算工具-Release
+        path: cpp_version/自动化计算工具.exe
+
+    - name: Upload artifact (MinSizeRel)
+      if: matrix.build_type == 'MinSizeRel'
+      uses: actions/upload-artifact@v4
+      with:
+        name: 自动化计算工具-MinSizeRel
+        path: cpp_version/自动化计算工具_mini.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Download Release artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: 自动化计算工具-Release
+        path: ./release
+
+    - name: Download MinSizeRel artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: 自动化计算工具-MinSizeRel
+        path: ./mini
+
+    - name: Get current date
+      id: date
+      run: echo "date=$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ steps.date.outputs.date }}
+        name: 自动化计算工具 ${{ steps.date.outputs.date }}
+        body: |
+          ## 自动化计算工具 - C++ Win32版
+          
+          ### 更新内容
+          - 自动构建版本
+          
+          ### 文件说明
+          - `自动化计算工具.exe` - 标准版本
+          - `自动化计算工具_mini.exe` - 最小体积版本
+          
+          ### 功能
+          - 打包数据查询
+          - 状态字查询
+          - 内存映象网计算
+          - 模拟量计算
+          - 速度转换
+          
+          ---
+          开发者：德龙轧钢自动化团队
+        files: |
+          release/自动化计算工具.exe
+          mini/自动化计算工具_mini.exe
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
