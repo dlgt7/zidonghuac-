@@ -52,6 +52,8 @@ static const COLORREF COLOR_INFO = RGB(52, 152, 219);
 static const COLORREF COLOR_SUCCESS = RGB(39, 174, 96);
 static const COLORREF COLOR_BG = RGB(240, 240, 240);
 static const COLORREF COLOR_TITLE_BG = RGB(230, 243, 255);
+static const COLORREF COLOR_SELECT_BG = RGB(208, 232, 240);
+static const COLORREF COLOR_ACTIVE_BG = RGB(224, 224, 224);
 
 //=============================================================================
 // 数据结构
@@ -395,6 +397,15 @@ static HWND CreateRadioButton(HWND parent, int id, const wchar_t* text, int x, i
     DWORD style = WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON;
     if (firstInGroup) style |= WS_GROUP;
     if (multiline) style |= BS_MULTILINE;
+    HWND hRadio = CreateWindowExW(0, L"BUTTON", text, style, x, y, w, h, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
+    if (hRadio && g_hFont) SendMessageW(hRadio, WM_SETFONT, (WPARAM)g_hFont, TRUE);
+    if (checked) SendMessageW(hRadio, BM_SETCHECK, BST_CHECKED, 0);
+    return hRadio;
+}
+
+static HWND CreatePushButtonRadio(HWND parent, int id, const wchar_t* text, int x, int y, int w, int h, bool checked = false, bool firstInGroup = false) {
+    DWORD style = WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON | BS_PUSHLIKE | BS_OWNERDRAW;
+    if (firstInGroup) style |= WS_GROUP;
     HWND hRadio = CreateWindowExW(0, L"BUTTON", text, style, x, y, w, h, parent, (HMENU)(INT_PTR)id, g_hInst, nullptr);
     if (hRadio && g_hFont) SendMessageW(hRadio, WM_SETFONT, (WPARAM)g_hFont, TRUE);
     if (checked) SendMessageW(hRadio, BM_SETCHECK, BST_CHECKED, 0);
@@ -1731,16 +1742,16 @@ static void CreateStatusTab(HWND hParent) {
 static void CreateMemoryTab(HWND hParent) {
     HWND hTypeGroup = CreateGroupBox(hParent, 0, L"计算类型", 10, 10, 150, 200);
     
-    int y = 25;
+    int y = 20;
     const wchar_t* types[] = {
-        L"模拟量计算\r\n16进制地址",
-        L"模拟量计算\r\nR地址",
-        L"数字量计算\r\n16进制地址和位数",
-        L"数字量计算\r\nM地址"
+        L"模拟量计算\n16进制地址",
+        L"模拟量计算\nR地址",
+        L"数字量计算\n16进制地址和位数",
+        L"数字量计算\nM地址"
     };
     
     for (int i = 0; i < 4; ++i) {
-        HWND hRadio = CreateRadioButton(hTypeGroup, IDC_MEM_CALC_TYPE + i, types[i], 10, y, 130, 40, i == 0, i == 0, true);
+        HWND hRadio = CreatePushButtonRadio(hTypeGroup, IDC_MEM_CALC_TYPE + i, types[i], 10, y, 130, 40, i == 0, i == 0);
         y += 45;
     }
     
@@ -2073,6 +2084,58 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM l
             // 默认背景
             SetBkColor(hdcStatic, COLOR_BG);
             return (INT_PTR)g_hBrushBg;
+        }
+        
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* pDIS = (DRAWITEMSTRUCT*)lParam;
+            if (pDIS->CtlType != ODT_BUTTON) break;
+            
+            HDC hdc = pDIS->hDC;
+            RECT rc = pDIS->rcItem;
+            
+            bool isChecked = (pDIS->itemState & ODS_CHECKED) != 0;
+            bool isHover = (pDIS->itemState & ODS_HOTLIGHT) != 0;
+            bool isFocused = (pDIS->itemState & ODS_FOCUS) != 0;
+            bool isSelected = (pDIS->itemState & ODS_SELECTED) != 0;
+            
+            COLORREF bgColor = isChecked ? COLOR_SELECT_BG : COLOR_BG;
+            if (isHover && !isChecked) bgColor = COLOR_ACTIVE_BG;
+            
+            HBRUSH hBrush = CreateSolidBrush(bgColor);
+            FillRect(hdc, &rc, hBrush);
+            DeleteObject(hBrush);
+            
+            UINT edgeFlags = isChecked ? BDR_SUNKENINNER : BDR_RAISEDINNER;
+            if (isSelected) edgeFlags = BDR_SUNKENOUTER;
+            DrawEdge(hdc, &rc, edgeFlags, BF_RECT | BF_MIDDLE);
+            
+            if (isFocused) {
+                RECT focusRect = rc;
+                InflateRect(&focusRect, -3, -3);
+                DrawFocusRect(hdc, &focusRect);
+            }
+            
+            int textLen = GetWindowTextLengthW(pDIS->hwndItem);
+            if (textLen > 0) {
+                std::wstring text(textLen + 1, 0);
+                GetWindowTextW(pDIS->hwndItem, &text[0], textLen + 1);
+                text.resize(textLen);
+                
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(0, 0, 0));
+                
+                HFONT hOldFont = (HFONT)SelectObject(hdc, g_hFont);
+                
+                RECT textRect = rc;
+                InflateRect(&textRect, -4, -4);
+                
+                DrawTextW(hdc, text.c_str(), -1, &textRect, 
+                    DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+                
+                SelectObject(hdc, hOldFont);
+            }
+            
+            return TRUE;
         }
             
         case WM_DPICHANGED: {
